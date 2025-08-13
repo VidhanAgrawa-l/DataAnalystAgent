@@ -1,0 +1,9 @@
+Scrape current weather data from https://wttr.in/London?format=j1
+
+Answer the following questions and respond with a JSON object:
+{
+  "current_temperature": "...",
+  "humidity": "...",
+  "wind_speed": "...",
+  "weather_description": "..."
+}

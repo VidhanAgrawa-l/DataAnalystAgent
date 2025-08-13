@@ -1,0 +1,16 @@
+Please find the Project 2 Submission Portal link below:
+
+http://34.100.231.127:8000/
+
+When you submit your endpoint and your github repo,
+
+A request will first be sent to your github to see if its publicly accessible. This must be unique.
+The next check is to see if an MIT LICENSE file is present.
+Then 3 simultaneous requests are sent to your API endpoint with the 3 separate public test cases each with their own set of questions.txt 
+There are 4 retries with 5 min timeouts. Your API must respond within 5 minutes of the request being sent. If it does not you will not be scored on the questions for that test case (Hint: at least return something in the given time frame even if the answers are wrong - you will get marks for responding with right json structure).
+Note that a single curl request will have multiple questions that are specified in the questions.txt attachment. Each curl request gets 5 minutes to respond (not each question). 
+You will be graded on how many questions you get correct. If your curl request fails after 4 retries, you will lose all marks for that question set related to that specific questions.txt
+You will still get marks if any of your other other curl requests succeed.
+During this phase of testing, the submission portal will prevent you from submitting another request. Once the API tests are complete, you will be able to download the output of the tests.
+At this point, if you choose to do so you can submit another test. Note that each test will use up your AI credits.
+The marks will come from private test cases which will not be tested until after the deadline has finished. No marks are given for public test cases. The public test cases are for your benefit to see if your application is working as intended.
