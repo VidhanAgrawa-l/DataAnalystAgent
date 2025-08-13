@@ -13,6 +13,7 @@ h11==0.16.0
 idna==3.10
 kiwisolver==1.4.9
 matplotlib==3.10.5
+networkx==3.5
 numpy==2.3.2
 packaging==25.0
 pandas==2.3.1

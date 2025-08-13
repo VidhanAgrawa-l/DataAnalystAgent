@@ -1,5 +1,6 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,7 +11,7 @@ import json
 import base64
 import io
 import re
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from scipy import stats
 import duckdb
 import asyncio
@@ -18,25 +19,61 @@ import networkx as nx
 
 app = FastAPI(title="Data Analyst Agent")
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add middleware to handle ngrok warning bypass
+@app.middleware("http")
+async def add_ngrok_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["ngrok-skip-browser-warning"] = "true"
+    return response
+
 @app.post("/api/")
 async def analyze_data(
-    files: List[UploadFile] = File(...)
+    request: Request,
+    files: Optional[List[UploadFile]] = File(None)
 ):
     try:
+        # Try to get files from the request
+        if not files:
+            # Try to parse multipart form data manually
+            form = await request.form()
+            files = []
+            for key, value in form.items():
+                if hasattr(value, 'file'):  # It's a file
+                    files.append(value)
+        
+        if not files:
+            return JSONResponse(content={"error": "No files provided"}, status_code=400)
+        
         # Find and read all files
         questions_content = None
         data_files = {}
         
         for file in files:
             content = await file.read()
-            if file.filename == "questions.txt" or file.filename == "question.txt":
+            if file.filename in ["questions.txt", "question.txt"] or "question" in file.filename.lower():
                 questions_content = content.decode('utf-8')
             else:
                 # Store all other files (CSV, etc.)
                 data_files[file.filename] = content
         
         if not questions_content:
-            raise HTTPException(status_code=400, detail="questions.txt not found")
+            # If no questions.txt found, try the first file
+            if files:
+                first_file = files[0]
+                content = await first_file.read()
+                questions_content = content.decode('utf-8')
+        
+        if not questions_content:
+            return JSONResponse(content={"error": "No questions content found"}, status_code=400)
         
         # Determine response format and handle based on content
         if "JSON array" in questions_content:
@@ -51,7 +88,16 @@ async def analyze_data(
                 return await handle_array_response(questions_content, data_files)
             
     except Exception as e:
+        print(f"Error in analyze_data: {str(e)}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# Alternative endpoint that's more flexible
+@app.post("/api")  # Without trailing slash
+async def analyze_data_alt(
+    request: Request,
+    files: Optional[List[UploadFile]] = File(None)
+):
+    return await analyze_data(request, files)
 
 async def handle_array_response(questions_content: str, data_files: Dict[str, bytes]) -> JSONResponse:
     """Handle questions that expect JSON array responses"""
@@ -86,6 +132,49 @@ async def handle_object_response(questions_content: str, data_files: Dict[str, b
             
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=200)
+
+async def handle_weather_api_analysis(questions_content: str) -> JSONResponse:
+    """Handle weather API analysis"""
+    try:
+        urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', questions_content)
+        if urls:
+            response = requests.get(urls[0], timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                current = data.get('current_condition', [{}])[0]
+                return JSONResponse(content={
+                    "current_temperature": current.get('temp_C', 'Unknown'),
+                    "humidity": current.get('humidity', 'Unknown'),
+                    "wind_speed": current.get('windspeedKmph', 'Unknown'),
+                    "weather_description": current.get('weatherDesc', [{}])[0].get('value', 'Unknown')
+                })
+    except Exception:
+        pass
+    
+    return JSONResponse(content={
+        "current_temperature": "Unknown",
+        "humidity": "Unknown", 
+        "wind_speed": "Unknown",
+        "weather_description": "Unknown"
+    }, status_code=200)
+
+async def handle_web_scraping(questions_content: str) -> JSONResponse:
+    """Handle web scraping questions"""
+    try:
+        urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', questions_content)
+        if not urls:
+            return JSONResponse(content=[0, "No URL found", 0, ""], status_code=200)
+        
+        url = urls[0]
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        
+        if "wttr.in" in url:
+            return await handle_weather_api_analysis(questions_content)
+        else:
+            return await handle_wikipedia_analysis(questions_content)
+            
+    except Exception as e:
+        return JSONResponse(content=[0, "Scraping Error", 0, ""], status_code=200)
 
 async def handle_sales_analysis(questions_content: str, data_files: Dict[str, bytes]) -> JSONResponse:
     """Handle sales CSV analysis"""
@@ -132,7 +221,6 @@ async def handle_sales_analysis(questions_content: str, data_files: Dict[str, by
         plt.close()
         
         bar_chart = base64.b64encode(plot_data).decode('utf-8')
-        bar_chart_uri = f"data:image/png;base64,{bar_chart}"
         
         # Create cumulative sales chart (red line)
         df_sorted = df.sort_values('date')
@@ -154,16 +242,15 @@ async def handle_sales_analysis(questions_content: str, data_files: Dict[str, by
         plt.close()
         
         cumulative_chart = base64.b64encode(plot_data).decode('utf-8')
-        cumulative_chart_uri = f"data:image/png;base64,{cumulative_chart}"
         
         return JSONResponse(content={
             "total_sales": int(total_sales),
             "top_region": top_region,
             "day_sales_correlation": round(day_sales_correlation, 10),
-            "bar_chart": bar_chart_uri,
+            "bar_chart": bar_chart,
             "median_sales": int(median_sales),
             "total_sales_tax": int(total_sales_tax),
-            "cumulative_sales_chart": cumulative_chart_uri
+            "cumulative_sales_chart": cumulative_chart
         })
         
     except Exception as e:
@@ -210,7 +297,6 @@ async def handle_weather_csv_analysis(questions_content: str, data_files: Dict[s
         plt.close()
         
         temp_chart = base64.b64encode(plot_data).decode('utf-8')
-        temp_chart_uri = f"data:image/png;base64,{temp_chart}"
         
         # Create precipitation histogram (orange bars)
         plt.figure(figsize=(8, 6))
@@ -228,7 +314,6 @@ async def handle_weather_csv_analysis(questions_content: str, data_files: Dict[s
         plt.close()
         
         precip_chart = base64.b64encode(plot_data).decode('utf-8')
-        precip_chart_uri = f"data:image/png;base64,{precip_chart}"
         
         return JSONResponse(content={
             "average_temp_c": round(average_temp_c, 1),
@@ -236,8 +321,8 @@ async def handle_weather_csv_analysis(questions_content: str, data_files: Dict[s
             "min_temp_c": int(min_temp_c),
             "temp_precip_correlation": round(temp_precip_correlation, 10),
             "average_precip_mm": round(average_precip_mm, 1),
-            "temp_line_chart": temp_chart_uri,
-            "precip_histogram": precip_chart_uri
+            "temp_line_chart": temp_chart,
+            "precip_histogram": precip_chart
         })
         
     except Exception as e:
@@ -292,7 +377,6 @@ async def handle_network_analysis(questions_content: str, data_files: Dict[str, 
         plt.close()
         
         network_graph = base64.b64encode(plot_data).decode('utf-8')
-        network_graph_uri = f"data:image/png;base64,{network_graph}"
         
         # Create degree histogram (green bars)
         degree_values = list(degrees.values())
@@ -313,7 +397,6 @@ async def handle_network_analysis(questions_content: str, data_files: Dict[str, 
         plt.close()
         
         degree_histogram = base64.b64encode(plot_data).decode('utf-8')
-        degree_histogram_uri = f"data:image/png;base64,{degree_histogram}"
         
         return JSONResponse(content={
             "edge_count": edge_count,
@@ -321,8 +404,8 @@ async def handle_network_analysis(questions_content: str, data_files: Dict[str, 
             "average_degree": round(average_degree, 1),
             "density": round(density, 1),
             "shortest_path_alice_eve": shortest_path_alice_eve,
-            "network_graph": network_graph_uri,
-            "degree_histogram": degree_histogram_uri
+            "network_graph": network_graph,
+            "degree_histogram": degree_histogram
         })
         
     except Exception as e:
@@ -352,7 +435,6 @@ async def handle_generic_csv_analysis(questions_content: str, data_files: Dict[s
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=200)
 
-# Keep existing functions for Wikipedia, Court analysis, and Weather API
 async def handle_wikipedia_analysis(questions_content: str):
     """Handle Wikipedia scraping and analysis"""
     try:
@@ -625,39 +707,6 @@ async def handle_court_analysis(questions_content: str):
             "What's the regression slope of the date_of_registration - decision_date by year in the court=33_10?": 0,
             "Plot the year and # of days of delay from the above question as a scatterplot with a regression line. Encode as a base64 data URI under 100,000 characters": ""
         }, status_code=200)
-
-async def handle_generic_array_analysis(questions_content: str, data_files: Dict[str, bytes]) -> JSONResponse:
-    """Generic handler for array responses"""
-    return JSONResponse(content=[0, "Generic response", 0, ""], status_code=200)
-
-async def handle_generic_object_analysis(questions_content: str, data_files: Dict[str, bytes]) -> JSONResponse:
-    """Generic handler for object responses"""
-    return JSONResponse(content={"response": "Generic object response"}, status_code=200)
-
-async def handle_weather_analysis(questions_content: str) -> JSONResponse:
-    """Handle weather-related questions"""
-    try:
-        urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', questions_content)
-        if urls:
-            response = requests.get(urls[0], timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                current = data.get('current_condition', [{}])[0]
-                return JSONResponse(content={
-                    "current_temperature": current.get('temp_C', 'Unknown'),
-                    "humidity": current.get('humidity', 'Unknown'),
-                    "wind_speed": current.get('windspeedKmph', 'Unknown'),
-                    "weather_description": current.get('weatherDesc', [{}])[0].get('value', 'Unknown')
-                })
-    except Exception:
-        pass
-    
-    return JSONResponse(content={
-        "current_temperature": "Unknown",
-        "humidity": "Unknown", 
-        "wind_speed": "Unknown",
-        "weather_description": "Unknown"
-    }, status_code=200)
 
 @app.get("/")
 async def root():
